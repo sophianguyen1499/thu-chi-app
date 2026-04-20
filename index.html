@@ -1,0 +1,694 @@
+import { useState, useEffect, useRef } from "react";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
+
+const CATS = ["ăn uống","cafe","di chuyển","mua sắm","tiền nhà","điện nước","giải trí","sức khỏe","công việc","khác"];
+const ICONS = {"ăn uống":"🍜","cafe":"☕","di chuyển":"🚗","mua sắm":"🛍","tiền nhà":"🏠","điện nước":"💡","giải trí":"🎮","sức khỏe":"💊","công việc":"💼","khác":"📌"};
+const PALETTE = ["#378ADD","#639922","#E24B4A","#BA7517","#7F77DD","#1D9E75","#D85A30","#5F5E5A","#D4537E","#888780"];
+const SK_TXN = "fin_v5", SK_BDG = "fin_budget_v1";
+
+const GRN="#27500A", RED="#791F1F", BLU="#0C447C", AMB="#633806";
+const GRN_BG="#EAF3DE", RED_BG="#FCEBEB", BLU_BG="#E6F1FB", AMB_BG="#FAEEDA";
+const GRN_MID="#639922", RED_MID="#E24B4A", BLU_MID="#378ADD", AMB_MID="#BA7517";
+
+function parse(raw) {
+  if (!raw) return null;
+  const txt = raw.trim();
+  let type = /(thu|nhận|lương|hoàn|refund|khách trả)/i.test(txt) ? "income" : "expense";
+  const rx = /([\d]+(?:[.,]\d+)?)\s*(tr|triệu|k|nghìn|ngàn)?/gi;
+  let amount = 0, amtStr = "", m;
+  while ((m = rx.exec(txt)) !== null) {
+    const n = parseFloat(m[1].replace(",",".")), u = (m[2]||"").toLowerCase();
+    const v = u==="tr"||u==="triệu" ? n*1e6 : u==="k"||u==="nghìn"||u==="ngàn" ? n*1e3 : n;
+    if (v > amount) { amount = v; amtStr = m[0]; }
+  }
+  amount = Math.round(amount);
+  let desc = txt.replace(amtStr,"").replace(/\b(chi|thu|nhận|lương|hoàn|refund|khách trả|trả|mua)\b/gi,"").replace(/\s+/g," ").trim() || txt;
+  const d = desc.toLowerCase();
+  let cat = "khác";
+  if (/(cafe|cà phê|coffee|trà sữa|boba)/.test(d)) cat="cafe";
+  else if (/(cơm|phở|bún|ăn|quán|nhà hàng|pizza|burger|sushi|hadilao|lẩu|bánh|food)/.test(d)) cat="ăn uống";
+  else if (/(grab|xe|taxi|xăng|bus|ship|giao hàng|uber|parking)/.test(d)) cat="di chuyển";
+  else if (/(shopee|lazada|mua|shop|tiki|order|amazon)/.test(d)) cat="mua sắm";
+  else if (/(nhà|thuê|phòng|rent|chung cư)/.test(d)) cat="tiền nhà";
+  else if (/(điện|nước|internet|wifi|điện thoại)/.test(d)) cat="điện nước";
+  else if (/(phim|game|nhạc|karaoke|netflix|spotify)/.test(d)) cat="giải trí";
+  else if (/(thuốc|bác sĩ|khám|gym|spa)/.test(d)) cat="sức khỏe";
+  else if (/(lương|công|freelance|thưởng|salary|dự án)/.test(d)) cat="công việc";
+  return { amount, type, description: desc, category: cat };
+}
+
+function fVND(n) {
+  if (!n) return "0đ"; n = Math.abs(n);
+  if (n >= 1e9) return (n/1e9).toFixed(2)+"B";
+  if (n >= 1e6) return (n/1e6).toFixed(1)+"M";
+  if (n >= 1e3) return Math.round(n/1e3)+"K";
+  return n+"đ";
+}
+function fFull(n) { return new Intl.NumberFormat("vi-VN").format(Math.round(n))+"đ"; }
+function genId() { return Date.now()+Math.random().toString(36).slice(2); }
+function toDay() { return new Date().toISOString().slice(0,10); }
+function thisMonth() { const n=new Date(); return {m:n.getMonth(),y:n.getFullYear()}; }
+
+async function ldStore(key) { try { const r=await window.storage.get(key); return r?JSON.parse(r.value):null; } catch { return null; } }
+async function svStore(key,d) { try { await window.storage.set(key,JSON.stringify(d)); } catch {} }
+
+export default function App() {
+  const [txns,setTxns]=useState([]);
+  const [budgets,setBudgets]=useState({}); // {cat: amount}
+  const [tab,setTab]=useState("quick");
+  const [loading,setLoading]=useState(true);
+
+  // Quick entry
+  const [note,setNote]=useState("");
+  const [selType,setSelType]=useState("expense");
+  const [selCat,setSelCat]=useState("ăn uống");
+  const [desc,setDesc]=useState("");
+  const [amount,setAmount]=useState("");
+  const [parsed,setParsed]=useState(null);
+  const [imgPrev,setImgPrev]=useState(null);
+  const [flash,setFlash]=useState(false);
+
+  // Periods
+  const [period,setPeriod]=useState("month");
+  const [rptPeriod,setRptPeriod]=useState("month");
+  const [histFilter,setHistFilter]=useState("all");
+  const [search,setSearch]=useState("");
+  const [detail,setDetail]=useState(null);
+
+  // Budget editing
+  const [editBudget,setEditBudget]=useState(false);
+  const [bdgDraft,setBdgDraft]=useState({});
+
+  const fileRef=useRef(), noteRef=useRef();
+
+  useEffect(()=>{
+    Promise.all([ldStore(SK_TXN),ldStore(SK_BDG)]).then(([t,b])=>{
+      setTxns(t||[]); setBudgets(b||{}); setLoading(false);
+    });
+  },[]);
+
+  async function persistTxns(u){setTxns(u);await svStore(SK_TXN,u);}
+  async function persistBudgets(b){setBudgets(b);await svStore(SK_BDG,b);}
+
+  // Month spending per category
+  const {m:nowM,y:nowY}=thisMonth();
+  const monthExp = {};
+  txns.filter(t=>{
+    const d=new Date(t.date_time);
+    return t.type==="expense"&&d.getMonth()===nowM&&d.getFullYear()===nowY;
+  }).forEach(t=>{ monthExp[t.category||"khác"]=(monthExp[t.category||"khác"]||0)+t.amount; });
+
+  function budgetStatus(cat) {
+    const bdg=budgets[cat], spent=monthExp[cat]||0;
+    if (!bdg) return null;
+    const pct=Math.round(spent/bdg*100);
+    if (pct>=100) return {pct,level:"over",color:RED_MID,bg:RED_BG,tc:RED,label:"Vượt ngân sách"};
+    if (pct>=80) return {pct,level:"warn",color:AMB_MID,bg:AMB_BG,tc:AMB,label:"Sắp đạt giới hạn"};
+    return {pct,level:"ok",color:GRN_MID,bg:GRN_BG,tc:GRN,label:"Trong ngân sách"};
+  }
+
+  // Alert cats for badge
+  const alertCats = CATS.filter(c=>{const s=budgetStatus(c); return s&&s.level!=="ok";});
+
+  // Parse note live
+  useEffect(()=>{
+    if (!note.trim()){setParsed(null);return;}
+    const p=parse(note);
+    if (p){setParsed(p);if(p.amount)setAmount(String(p.amount));setSelType(p.type);setSelCat(p.category);setDesc(p.description);}
+  },[note]);
+
+  const suggestions=(() => {
+    if (!note.trim()||note.length<2) return [];
+    const q=note.toLowerCase(), seen=new Set();
+    return txns.filter(t=>{
+      const key=t.description+t.amount;
+      if(seen.has(key)) return false;
+      if(t.description.toLowerCase().includes(q)||t.note_text?.toLowerCase().includes(q)){seen.add(key);return true;}
+      return false;
+    }).slice(0,3);
+  })();
+
+  const frequent=(() => {
+    const map={};
+    txns.forEach(t=>{const k=`${t.description}||${t.amount}||${t.type}||${t.category}`;if(!map[k])map[k]={...t,count:0};map[k].count++;});
+    return Object.values(map).sort((a,b)=>b.count-a.count).slice(0,8);
+  })();
+
+  function applyQuick(t){
+    setNote(t.note_text||t.description);setAmount(String(t.amount));setSelType(t.type);setSelCat(t.category);setDesc(t.description);
+    setParsed({amount:t.amount,type:t.type,description:t.description,category:t.category});
+  }
+
+  async function saveTxn(){
+    const amt=parseInt(amount)||parsed?.amount||0;
+    if(!amt) return;
+    const t={id:genId(),amount:amt,type:selType,description:desc||note,category:selCat,note_text:note,date_time:new Date().toISOString(),source:imgPrev?"screenshot":"manual",image_path:imgPrev||null,tags:[]};
+    const u=[t,...txns]; await persistTxns(u);
+    setFlash(true);setTimeout(()=>setFlash(false),1200);
+    setNote("");setAmount("");setDesc("");setParsed(null);setImgPrev(null);
+    noteRef.current?.focus();
+  }
+
+  function pickImg(e){
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();r.onload=ev=>setImgPrev(ev.target.result);r.readAsDataURL(f);
+  }
+  async function delTxn(id){await persistTxns(txns.filter(t=>t.id!==id));setDetail(null);}
+
+  function exportCSV(){
+    const rows=[["ID","Số tiền","Loại","Mô tả","Danh mục","Ghi chú","Ngày giờ","Nguồn"]];
+    txns.forEach(t=>rows.push([t.id,t.amount,t.type,t.description,t.category,t.note_text||"",t.date_time,t.source]));
+    const csv=rows.map(r=>r.map(c=>`"${String(c||"").replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a=document.createElement("a");
+    a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(csv);
+    a.download=`thu-chi-${toDay()}.csv`;a.click();
+  }
+
+  // Period filter
+  function inPeriod(t,p){
+    const d=new Date(t.date_time),now=new Date();
+    if(p==="today") return t.date_time?.slice(0,10)===toDay();
+    if(p==="week") return (now-d)/864e5<7;
+    if(p==="month") return d.getMonth()===nowM&&d.getFullYear()===nowY;
+    return true;
+  }
+  function summary(arr){
+    const inc=arr.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
+    const exp=arr.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+    return {inc,exp,net:inc-exp};
+  }
+  function catData(arr,type){
+    const m={};arr.filter(t=>t.type===type).forEach(t=>{m[t.category||"khác"]=(m[t.category||"khác"]||0)+t.amount;});
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]).map(([name,value])=>({name,value}));
+  }
+
+  const now2=new Date();
+  const dArr=txns.filter(t=>inPeriod(t,period));
+  const {inc:dI,exp:dE,net:dN}=summary(dArr);
+  const months=Array.from({length:6},(_,i)=>{
+    const d=new Date(now2.getFullYear(),now2.getMonth()-5+i,1);
+    const mo=txns.filter(t=>{const td=new Date(t.date_time);return td.getMonth()===d.getMonth()&&td.getFullYear()===d.getFullYear();});
+    return{name:["T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","T12"][d.getMonth()],thu:mo.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0),chi:mo.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0)};
+  });
+  const expPie=catData(dArr,"expense");
+  const rArr=txns.filter(t=>inPeriod(t,rptPeriod));
+  const {inc:rI,exp:rE,net:rN}=summary(rArr);
+  const rCats=catData(rArr,"expense");
+  const filtered=txns.filter(t=>{
+    if(histFilter!=="all"&&t.type!==histFilter)return false;
+    if(search&&!`${t.description} ${t.note_text} ${t.category}`.toLowerCase().includes(search.toLowerCase()))return false;
+    return true;
+  });
+  const grouped={};
+  filtered.forEach(t=>{const d=t.date_time?.slice(0,10)||toDay();if(!grouped[d])grouped[d]=[];grouped[d].push(t);});
+  const sortedDates=Object.keys(grouped).sort((a,b)=>b.localeCompare(a));
+
+  if(loading) return <div style={{padding:48,textAlign:"center",color:"var(--color-text-secondary)",fontSize:14}}>Đang tải...</div>;
+
+  // ── Style atoms ──
+  const card={background:"var(--color-background-primary)",borderRadius:14,border:"0.5px solid var(--color-border-tertiary)",padding:"16px",marginBottom:10};
+  const inp={width:"100%",padding:"12px 14px",borderRadius:10,border:"0.5px solid var(--color-border-secondary)",fontSize:15,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",boxSizing:"border-box",outline:"none"};
+  const pill=(active,bg,color,bc)=>({padding:"7px 14px",borderRadius:24,border:`1.5px solid ${active?bc:"var(--color-border-tertiary)"}`,background:active?bg:"transparent",color:active?color:"var(--color-text-secondary)",fontSize:13,fontWeight:active?500:400,cursor:"pointer",whiteSpace:"nowrap",transition:"all .12s"});
+  const tabBtn=(active,hasDot)=>({flex:1,padding:"13px 0",border:"none",borderTop:active?"2px solid var(--color-text-primary)":"2px solid transparent",background:"transparent",cursor:"pointer",fontSize:18,color:active?"var(--color-text-primary)":"var(--color-text-tertiary)",position:"relative"});
+
+  function MetricCards({inc,exp,net}){
+    return <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+      {[{l:"Thu",v:inc,c:GRN_MID,bg:GRN_BG},{l:"Chi",v:exp,c:RED_MID,bg:RED_BG},{l:"Còn lại",v:net,c:net>=0?BLU_MID:RED_MID,bg:net>=0?BLU_BG:RED_BG}].map(({l,v,c,bg})=>(
+        <div key={l} style={{background:bg,borderRadius:12,padding:"12px 10px"}}>
+          <div style={{fontSize:11,color:c,marginBottom:3,fontWeight:500}}>{l}</div>
+          <div style={{fontSize:15,fontWeight:500,color:c}}>{fVND(Math.abs(v))}</div>
+        </div>
+      ))}
+    </div>;
+  }
+
+  function PeriodPills({value,onChange}){
+    return <div style={{display:"flex",gap:6,marginBottom:14,overflowX:"auto",paddingBottom:2}}>
+      {[["today","Hôm nay"],["week","Tuần"],["month","Tháng"],["all","Tất cả"]].map(([k,v])=>(
+        <button key={k} style={pill(value===k,BLU_BG,BLU,BLU_MID)} onClick={()=>onChange(k)}>{v}</button>
+      ))}
+    </div>;
+  }
+
+  function BudgetBar({cat,compact=false}){
+    const s=budgetStatus(cat); if(!s) return null;
+    const spent=monthExp[cat]||0, bdg=budgets[cat];
+    return (
+      <div style={{marginTop:compact?4:6}}>
+        <div style={{height:4,borderRadius:2,background:"var(--color-background-tertiary)",overflow:"hidden"}}>
+          <div style={{height:4,borderRadius:2,background:s.color,width:`${Math.min(s.pct,100)}%`,transition:"width .3s"}}/>
+        </div>
+        {!compact && (
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginTop:3,color:s.tc}}>
+            <span>{s.label}</span>
+            <span>{fVND(spent)} / {fVND(bdg)}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function TxnItem({t,onClick}){
+    const isInc=t.type==="income";
+    return <div onClick={onClick} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",cursor:"pointer"}}>
+      <div style={{width:36,height:36,borderRadius:10,background:isInc?GRN_BG:RED_BG,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ICONS[t.category]||"📌"}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontSize:13,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.description}</div>
+        <div style={{fontSize:11,color:"var(--color-text-secondary)",marginTop:1}}>{t.category}{t.image_path?" · 📎":""}</div>
+      </div>
+      <div style={{fontSize:14,fontWeight:500,color:isInc?GRN_MID:RED_MID,flexShrink:0}}>{isInc?"+":"-"}{fVND(t.amount)}</div>
+    </div>;
+  }
+
+  // Current cat budget status for Quick entry
+  const activeCatStatus = selType==="expense" ? budgetStatus(selCat) : null;
+
+  return (
+    <div style={{maxWidth:480,margin:"0 auto",fontFamily:"var(--font-sans)",paddingBottom:72}}>
+
+      {/* Header */}
+      <div style={{padding:"18px 16px 0",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:20}}>💰</span>
+          <span style={{fontWeight:500,fontSize:16}}>Thu Chi Cá Nhân</span>
+        </div>
+        <span style={{fontSize:12,color:"var(--color-text-secondary)"}}>{toDay()}</span>
+      </div>
+
+      {/* ══ QUICK ENTRY ══ */}
+      {tab==="quick" && (
+        <div style={{padding:"14px 16px 0"}}>
+          {flash && (
+            <div style={{background:GRN_BG,border:`0.5px solid ${GRN_MID}`,borderRadius:10,padding:"10px 14px",marginBottom:12,display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:15}}>✅</span>
+              <span style={{fontSize:13,fontWeight:500,color:GRN}}>Đã lưu thành công!</span>
+            </div>
+          )}
+
+          {/* Note input */}
+          <div style={{position:"relative",marginBottom:8}}>
+            <input ref={noteRef} style={{...inp,paddingRight:40}} autoFocus
+              placeholder="cafe 200k chi  ·  lương 10tr thu  ·  ăn trưa 300k"
+              value={note} onChange={e=>setNote(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&saveTxn()}/>
+            {note && <button onClick={()=>{setNote("");setParsed(null);setAmount("");}}
+              style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",border:"none",background:"none",cursor:"pointer",fontSize:18,color:"var(--color-text-tertiary)",padding:0,lineHeight:1}}>×</button>}
+          </div>
+
+          {/* Live parse preview */}
+          {parsed?.amount>0 && (
+            <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:"var(--color-background-secondary)",marginBottom:10,border:"0.5px solid var(--color-border-tertiary)"}}>
+              <span style={{fontSize:20}}>{ICONS[parsed.category]||"📌"}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <span style={{fontSize:13,fontWeight:500}}>{parsed.description}</span>
+                <span style={{fontSize:12,color:"var(--color-text-secondary)",marginLeft:6}}>· {parsed.category}</span>
+              </div>
+              <span style={{fontWeight:500,fontSize:14,color:parsed.type==="income"?GRN_MID:RED_MID,flexShrink:0}}>
+                {parsed.type==="income"?"+":"-"}{fVND(parsed.amount)}
+              </span>
+            </div>
+          )}
+
+          {/* Suggestions */}
+          {suggestions.length>0 && (
+            <div style={{marginBottom:10}}>
+              {suggestions.map(t=>(
+                <div key={t.id} onClick={()=>applyQuick(t)}
+                  style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",borderRadius:9,background:"var(--color-background-secondary)",marginBottom:5,cursor:"pointer",border:"0.5px solid var(--color-border-tertiary)"}}>
+                  <span style={{fontSize:15}}>{ICONS[t.category]||"📌"}</span>
+                  <span style={{flex:1,fontSize:13}}>{t.description}</span>
+                  <span style={{fontSize:13,fontWeight:500,color:t.type==="income"?GRN_MID:RED_MID}}>{fVND(t.amount)}</span>
+                  <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>dùng lại ↩</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Type toggle */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+            {[["expense","💸 Chi tiêu",RED_BG,RED,RED_MID],["income","💰 Thu nhập",GRN_BG,GRN,GRN_MID]].map(([k,v,bg,tc,bc])=>(
+              <button key={k} onClick={()=>setSelType(k)} style={{padding:"11px",borderRadius:10,border:`1.5px solid ${selType===k?bc:"var(--color-border-tertiary)"}`,background:selType===k?bg:"transparent",color:selType===k?tc:"var(--color-text-secondary)",fontWeight:selType===k?500:400,cursor:"pointer",fontSize:14,transition:"all .12s"}}>{v}</button>
+            ))}
+          </div>
+
+          {/* Category chips */}
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10}}>
+            {CATS.map(c=>{
+              const active=selCat===c, st=selType==="expense"?budgetStatus(c):null;
+              const dotColor = st?.level==="over"?RED_MID : st?.level==="warn"?AMB_MID : null;
+              return <button key={c} onClick={()=>setSelCat(c)} style={{padding:"6px 12px",borderRadius:20,border:`1.5px solid ${active?BLU_MID:"var(--color-border-tertiary)"}`,background:active?BLU_BG:"transparent",color:active?BLU:"var(--color-text-secondary)",fontSize:12,cursor:"pointer",fontWeight:active?500:400,transition:"all .12s",position:"relative"}}>
+                {ICONS[c]} {c}
+                {dotColor && <span style={{position:"absolute",top:2,right:2,width:6,height:6,borderRadius:"50%",background:dotColor,display:"block"}}/>}
+              </button>;
+            })}
+          </div>
+
+          {/* Budget progress for selected category */}
+          {activeCatStatus && (
+            <div style={{padding:"10px 14px",borderRadius:10,background:activeCatStatus.bg,border:`0.5px solid ${activeCatStatus.color}`,marginBottom:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:12,fontWeight:500,color:activeCatStatus.tc,marginBottom:6}}>
+                <span>{activeCatStatus.level==="over"?"⚠️ Vượt ngân sách":activeCatStatus.level==="warn"?"🔶 Sắp đạt giới hạn":"✅ Trong ngân sách"} — {selCat}</span>
+                <span>{activeCatStatus.pct}%</span>
+              </div>
+              <div style={{height:5,borderRadius:3,background:"rgba(0,0,0,.08)"}}>
+                <div style={{height:5,borderRadius:3,background:activeCatStatus.color,width:`${Math.min(activeCatStatus.pct,100)}%`}}/>
+              </div>
+              <div style={{fontSize:11,color:activeCatStatus.tc,marginTop:4}}>
+                Đã dùng {fVND(monthExp[selCat]||0)} / {fVND(budgets[selCat])} tháng này
+              </div>
+            </div>
+          )}
+
+          {/* Image attach */}
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+            <button onClick={()=>fileRef.current.click()}
+              style={{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",borderRadius:9,border:"0.5px solid var(--color-border-secondary)",background:"transparent",cursor:"pointer",fontSize:13,color:"var(--color-text-secondary)"}}>
+              <span style={{fontSize:15}}>📷</span>{imgPrev?"Ảnh đính kèm ✅":"Đính kèm ảnh"}
+            </button>
+            {imgPrev && <button onClick={()=>setImgPrev(null)} style={{border:"none",background:"none",cursor:"pointer",fontSize:13,color:RED_MID}}>Xoá ảnh</button>}
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={pickImg}/>
+          {imgPrev && <img src={imgPrev} style={{width:"100%",maxHeight:130,objectFit:"contain",borderRadius:10,marginBottom:12,border:"0.5px solid var(--color-border-tertiary)"}}/>}
+
+          {/* Save */}
+          <button onClick={saveTxn} disabled={!amount&&!parsed?.amount}
+            style={{width:"100%",padding:"15px",borderRadius:12,border:"none",cursor:(amount||parsed?.amount)?"pointer":"not-allowed",fontSize:16,fontWeight:500,background:(amount||parsed?.amount)?(selType==="expense"?RED_MID:GRN_MID):"var(--color-background-secondary)",color:(amount||parsed?.amount)?"#fff":"var(--color-text-tertiary)",transition:"background .15s"}}>
+            {selType==="expense"?"💸 Lưu chi tiêu":"💰 Lưu thu nhập"}
+          </button>
+
+          {/* Frequently used */}
+          {frequent.length>0&&!note && (
+            <div style={{marginTop:18}}>
+              <div style={{fontSize:12,color:"var(--color-text-secondary)",fontWeight:500,marginBottom:8}}>Hay dùng — bấm để ghi nhanh</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {frequent.map((t,i)=>(
+                  <button key={i} onClick={()=>applyQuick(t)}
+                    style={{display:"flex",alignItems:"center",gap:5,padding:"7px 12px",borderRadius:20,border:"0.5px solid var(--color-border-tertiary)",background:"var(--color-background-secondary)",cursor:"pointer",fontSize:12,color:"var(--color-text-primary)"}}>
+                    <span style={{fontSize:13}}>{ICONS[t.category]||"📌"}</span>
+                    <span>{t.description}</span>
+                    <span style={{color:t.type==="income"?GRN_MID:RED_MID,fontWeight:500}}>{fVND(t.amount)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ══ DASHBOARD ══ */}
+      {tab==="dashboard" && (
+        <div style={{padding:"14px 16px 0"}}>
+          {/* Budget alerts */}
+          {alertCats.length>0 && (
+            <div style={{marginBottom:12}}>
+              {alertCats.map(cat=>{
+                const s=budgetStatus(cat);
+                return <div key={cat} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:s.bg,border:`0.5px solid ${s.color}`,marginBottom:6}}>
+                  <span style={{fontSize:16}}>{ICONS[cat]}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:13,fontWeight:500,color:s.tc}}>{s.level==="over"?"⚠️ Vượt ngân sách":"🔶 Sắp đạt giới hạn"} · {cat}</div>
+                    <BudgetBar cat={cat} compact/>
+                    <div style={{fontSize:11,color:s.tc,marginTop:3}}>{fVND(monthExp[cat]||0)} / {fVND(budgets[cat])} · {s.pct}%</div>
+                  </div>
+                </div>;
+              })}
+            </div>
+          )}
+
+          <PeriodPills value={period} onChange={setPeriod}/>
+          <MetricCards inc={dI} exp={dE} net={dN}/>
+
+          <div style={card}>
+            <div style={{fontSize:13,fontWeight:500,marginBottom:12,color:"var(--color-text-secondary)"}}>Thu chi 6 tháng</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <LineChart data={months} margin={{top:4,right:4,left:-28,bottom:0}}>
+                <XAxis dataKey="name" tick={{fontSize:10,fill:"var(--color-text-tertiary)"}} axisLine={false} tickLine={false}/>
+                <YAxis tick={{fontSize:9,fill:"var(--color-text-tertiary)"}} tickFormatter={v=>fVND(v)} axisLine={false} tickLine={false}/>
+                <Tooltip formatter={v=>fFull(v)} contentStyle={{fontSize:12,borderRadius:8,border:"0.5px solid var(--color-border-secondary)"}}/>
+                <Line type="monotone" dataKey="thu" stroke={GRN_MID} strokeWidth={2} dot={{r:3,fill:GRN_MID}} name="Thu"/>
+                <Line type="monotone" dataKey="chi" stroke={RED_MID} strokeWidth={2} dot={{r:3,fill:RED_MID}} name="Chi"/>
+              </LineChart>
+            </ResponsiveContainer>
+            <div style={{display:"flex",gap:16,justifyContent:"center",marginTop:6}}>
+              {[["Thu",GRN_MID],["Chi",RED_MID]].map(([l,c])=>(
+                <span key={l} style={{fontSize:11,color:"var(--color-text-secondary)",display:"flex",alignItems:"center",gap:5}}>
+                  <span style={{width:12,height:3,background:c,borderRadius:2,display:"inline-block"}}/>{l}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+            <div style={{...card,marginBottom:0,padding:"14px 12px"}}>
+              <div style={{fontSize:12,fontWeight:500,marginBottom:6,color:"var(--color-text-secondary)"}}>Chi tiêu kỳ này</div>
+              {expPie.length===0
+                ?<div style={{fontSize:12,color:"var(--color-text-tertiary)",textAlign:"center",padding:"20px 0"}}>Chưa có</div>
+                :<>
+                  <PieChart width={130} height={100}>
+                    <Pie data={expPie} cx={65} cy={50} innerRadius={26} outerRadius={46} paddingAngle={2} dataKey="value">
+                      {expPie.map((_,i)=><Cell key={i} fill={PALETTE[i%PALETTE.length]}/>)}
+                    </Pie>
+                    <Tooltip formatter={v=>fFull(v)} contentStyle={{fontSize:11,borderRadius:8}}/>
+                  </PieChart>
+                  {expPie.slice(0,3).map((d,i)=>(
+                    <div key={d.name} style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:3}}>
+                      <span style={{display:"flex",alignItems:"center",gap:4}}>
+                        <span style={{width:7,height:7,borderRadius:2,background:PALETTE[i],display:"inline-block"}}/>
+                        <span style={{color:"var(--color-text-secondary)"}}>{d.name}</span>
+                      </span>
+                      <span style={{fontWeight:500,color:"var(--color-text-primary)"}}>{dE>0?Math.round(d.value/dE*100):0}%</span>
+                    </div>
+                  ))}
+                </>}
+            </div>
+            <div style={{...card,marginBottom:0,padding:"14px 12px"}}>
+              <div style={{fontSize:12,fontWeight:500,marginBottom:10,color:"var(--color-text-secondary)"}}>Tổng quan</div>
+              {[{l:"Thu vào",v:dI,c:GRN_MID},{l:"Chi ra",v:dE,c:RED_MID},{l:"Còn lại",v:dN,c:dN>=0?BLU_MID:RED_MID}].map(({l,v,c})=>(
+                <div key={l} style={{marginBottom:10}}>
+                  <div style={{fontSize:11,color:"var(--color-text-secondary)",marginBottom:1}}>{l}</div>
+                  <div style={{fontSize:15,fontWeight:500,color:c}}>{(v<0?"-":"")+fVND(Math.abs(v))}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <span style={{fontSize:13,fontWeight:500}}>Giao dịch gần đây</span>
+              <button onClick={()=>setTab("history")} style={{border:"none",background:"none",cursor:"pointer",fontSize:12,color:BLU_MID,padding:0}}>Xem tất cả →</button>
+            </div>
+            {txns.length===0
+              ?<div style={{textAlign:"center",padding:"20px 0",fontSize:13,color:"var(--color-text-secondary)"}}>Chưa có giao dịch nào</div>
+              :txns.slice(0,5).map(t=><TxnItem key={t.id} t={t} onClick={()=>setDetail(t)}/>)}
+          </div>
+        </div>
+      )}
+
+      {/* ══ HISTORY ══ */}
+      {tab==="history" && (
+        <div style={{padding:"14px 16px 0"}}>
+          <div style={{position:"relative",marginBottom:10}}>
+            <input style={{...inp,paddingLeft:38}} placeholder="Tìm kiếm giao dịch..." value={search} onChange={e=>setSearch(e.target.value)}/>
+            <span style={{position:"absolute",left:13,top:"50%",transform:"translateY(-50%)",fontSize:14,pointerEvents:"none"}}>🔍</span>
+          </div>
+          <div style={{display:"flex",gap:6,marginBottom:14}}>
+            {[["all","Tất cả"],["income","Thu"],["expense","Chi"]].map(([k,v])=>(
+              <button key={k} style={pill(histFilter===k,BLU_BG,BLU,BLU_MID)} onClick={()=>setHistFilter(k)}>{v}</button>
+            ))}
+          </div>
+          {sortedDates.length===0&&<div style={{textAlign:"center",padding:48,fontSize:13,color:"var(--color-text-secondary)"}}>Không có giao dịch nào</div>}
+          {sortedDates.map(date=>{
+            const dayTotal=grouped[date].reduce((s,t)=>s+(t.type==="income"?t.amount:-t.amount),0);
+            return <div key={date}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--color-text-secondary)",fontWeight:500,marginBottom:5,marginTop:8,padding:"0 2px"}}>
+                <span>{date}</span>
+                <span style={{color:dayTotal>=0?GRN_MID:RED_MID,fontWeight:500}}>{dayTotal>=0?"+":""}{fVND(dayTotal)}</span>
+              </div>
+              <div style={{...card,padding:"4px 14px"}}>
+                {grouped[date].map(t=><TxnItem key={t.id} t={t} onClick={()=>setDetail(t)}/>)}
+              </div>
+            </div>;
+          })}
+        </div>
+      )}
+
+      {/* ══ REPORT ══ */}
+      {tab==="report" && (
+        <div style={{padding:"14px 16px 0"}}>
+          <PeriodPills value={rptPeriod} onChange={setRptPeriod}/>
+          <MetricCards inc={rI} exp={rE} net={rN}/>
+
+          {/* Budget overview */}
+          {Object.keys(budgets).length>0 && (
+            <div style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <span style={{fontSize:13,fontWeight:500}}>Ngân sách tháng này</span>
+                <button onClick={()=>{setBdgDraft({...budgets});setEditBudget(true);}} style={{border:"none",background:"none",cursor:"pointer",fontSize:12,color:BLU_MID,padding:0}}>Chỉnh sửa</button>
+              </div>
+              {CATS.filter(c=>budgets[c]).map(c=>{
+                const s=budgetStatus(c), spent=monthExp[c]||0;
+                return <div key={c} style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
+                    <span style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:14}}>{ICONS[c]}</span>{c}</span>
+                    <span style={{fontWeight:500,color:s?.tc||"var(--color-text-primary)"}}>{fVND(spent)} <span style={{fontSize:11,color:"var(--color-text-secondary)"}}>/ {fVND(budgets[c])}</span></span>
+                  </div>
+                  <div style={{height:6,borderRadius:3,background:"var(--color-background-tertiary)"}}>
+                    <div style={{height:6,borderRadius:3,background:s?.color||BLU_MID,width:`${Math.min(s?.pct||0,100)}%`,transition:"width .3s"}}/>
+                  </div>
+                  {s && <div style={{fontSize:10,color:s.tc,marginTop:2,textAlign:"right"}}>{s.pct}% · {s.label}</div>}
+                </div>;
+              })}
+            </div>
+          )}
+
+          {Object.keys(budgets).length===0 && (
+            <div style={{...card,textAlign:"center",padding:"20px 16px"}}>
+              <div style={{fontSize:24,marginBottom:8}}>🎯</div>
+              <div style={{fontSize:14,fontWeight:500,marginBottom:4}}>Chưa có ngân sách</div>
+              <div style={{fontSize:12,color:"var(--color-text-secondary)",marginBottom:12}}>Đặt giới hạn chi tiêu theo danh mục để kiểm soát tốt hơn</div>
+              <button onClick={()=>{setBdgDraft({...budgets});setEditBudget(true);}}
+                style={{padding:"10px 20px",borderRadius:9,border:"none",background:BLU_MID,color:"#fff",cursor:"pointer",fontSize:14,fontWeight:500}}>
+                + Thiết lập ngân sách
+              </button>
+            </div>
+          )}
+
+          <div style={card}>
+            <div style={{fontSize:13,fontWeight:500,marginBottom:12,color:"var(--color-text-secondary)"}}>Chi tiêu theo tháng</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <LineChart data={months} margin={{top:4,right:4,left:-28,bottom:0}}>
+                <XAxis dataKey="name" tick={{fontSize:10,fill:"var(--color-text-tertiary)"}} axisLine={false} tickLine={false}/>
+                <YAxis tick={{fontSize:9,fill:"var(--color-text-tertiary)"}} tickFormatter={v=>fVND(v)} axisLine={false} tickLine={false}/>
+                <Tooltip formatter={v=>fFull(v)} contentStyle={{fontSize:12,borderRadius:8,border:"0.5px solid var(--color-border-secondary)"}}/>
+                <Line type="monotone" dataKey="thu" stroke={GRN_MID} strokeWidth={2} dot={{r:3,fill:GRN_MID}} name="Thu"/>
+                <Line type="monotone" dataKey="chi" stroke={RED_MID} strokeWidth={2} dot={{r:3,fill:RED_MID}} name="Chi"/>
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {rCats.length>0 && (
+            <div style={card}>
+              <div style={{fontSize:13,fontWeight:500,marginBottom:14,color:"var(--color-text-secondary)"}}>Chi tiêu theo danh mục</div>
+              {rCats.map(({name,value},i)=>(
+                <div key={name} style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
+                    <span style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:14}}>{ICONS[name]||"📌"}</span>{name}</span>
+                    <span style={{fontWeight:500}}>{fVND(value)} <span style={{fontSize:11,color:"var(--color-text-secondary)"}}>({rE>0?Math.round(value/rE*100):0}%)</span></span>
+                  </div>
+                  <div style={{height:5,borderRadius:3,background:"var(--color-background-tertiary)"}}>
+                    <div style={{height:5,borderRadius:3,background:PALETTE[i%PALETTE.length],width:`${rE>0?Math.round(value/rE*100):0}%`,transition:"width .3s"}}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <span style={{fontSize:13,fontWeight:500}}>Giao dịch ({rArr.length})</span>
+              <button onClick={exportCSV} style={{display:"flex",alignItems:"center",gap:5,border:"none",background:"none",cursor:"pointer",fontSize:12,color:BLU_MID,padding:0}}>
+                ⬇ Xuất CSV
+              </button>
+            </div>
+            {rArr.length===0
+              ?<div style={{textAlign:"center",padding:16,fontSize:13,color:"var(--color-text-secondary)"}}>Không có dữ liệu</div>
+              :<div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse",tableLayout:"fixed"}}>
+                  <thead>
+                    <tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                      {[["Mô tả","45%"],["Loại","18%"],["Số tiền","22%"],["Ngày","15%"]].map(([h,w])=>(
+                        <th key={h} style={{padding:"6px 4px",fontWeight:500,textAlign:h==="Mô tả"?"left":"right",color:"var(--color-text-secondary)",width:w}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rArr.slice(0,30).map(t=>(
+                      <tr key={t.id} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",cursor:"pointer"}} onClick={()=>setDetail(t)}>
+                        <td style={{padding:"8px 4px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.description}</td>
+                        <td style={{padding:"8px 4px",textAlign:"right"}}>
+                          <span style={{fontSize:10,padding:"2px 7px",borderRadius:20,background:t.type==="income"?GRN_BG:RED_BG,color:t.type==="income"?GRN:RED}}>{t.type==="income"?"Thu":"Chi"}</span>
+                        </td>
+                        <td style={{padding:"8px 4px",textAlign:"right",fontWeight:500,color:t.type==="income"?GRN_MID:RED_MID}}>{fVND(t.amount)}</td>
+                        <td style={{padding:"8px 4px",textAlign:"right",color:"var(--color-text-secondary)"}}>{t.date_time?.slice(5,10)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>}
+          </div>
+        </div>
+      )}
+
+      {/* ── Bottom Nav ── */}
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"var(--color-background-primary)",borderTop:"0.5px solid var(--color-border-tertiary)",display:"flex",zIndex:50}}>
+        {[["dashboard","📊"],["quick","⚡"],["history","📋"],["report","📈"]].map(([k,icon])=>{
+          const showDot = k==="dashboard"&&alertCats.length>0;
+          return <button key={k} style={tabBtn(tab===k)} onClick={()=>setTab(k)}>
+            <span style={{position:"relative",display:"inline-block"}}>
+              {icon}
+              {showDot && <span style={{position:"absolute",top:-2,right:-4,width:7,height:7,borderRadius:"50%",background:RED_MID,display:"block"}}/>}
+            </span>
+          </button>;
+        })}
+      </div>
+
+      {/* ── Budget Edit Sheet ── */}
+      {editBudget && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"flex-end",zIndex:200}} onClick={()=>setEditBudget(false)}>
+          <div style={{...card,margin:0,borderRadius:"18px 18px 0 0",width:"100%",maxHeight:"88vh",overflowY:"auto",boxSizing:"border-box",padding:"20px 20px 32px"}} onClick={e=>e.stopPropagation()}>
+            <div style={{width:36,height:4,borderRadius:2,background:"var(--color-border-secondary)",margin:"0 auto 18px"}}/>
+            <div style={{fontSize:16,fontWeight:500,marginBottom:4}}>🎯 Thiết lập ngân sách</div>
+            <div style={{fontSize:12,color:"var(--color-text-secondary)",marginBottom:16}}>Đặt giới hạn chi tiêu hàng tháng. Để trống = không giới hạn. Tự động reset đầu tháng.</div>
+            {CATS.map(c=>(
+              <div key={c} style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+                <div style={{width:36,height:36,borderRadius:10,background:RED_BG,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ICONS[c]}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:500,marginBottom:4}}>{c}</div>
+                  {bdgDraft[c] && <div style={{fontSize:11,color:"var(--color-text-secondary)"}}>Đã dùng: {fVND(monthExp[c]||0)}</div>}
+                </div>
+                <input type="number" placeholder="Không giới hạn"
+                  value={bdgDraft[c]||""}
+                  onChange={e=>{const v=parseInt(e.target.value)||0;setBdgDraft(d=>v?{...d,[c]:v}:{...d,[c]:undefined});}}
+                  style={{width:120,padding:"8px 10px",borderRadius:8,border:"0.5px solid var(--color-border-secondary)",fontSize:13,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",textAlign:"right"}}/>
+              </div>
+            ))}
+            <div style={{display:"flex",gap:8,marginTop:8}}>
+              <button onClick={()=>setEditBudget(false)} style={{flex:1,padding:"13px",borderRadius:10,border:"0.5px solid var(--color-border-secondary)",background:"transparent",cursor:"pointer",fontSize:14,color:"var(--color-text-primary)"}}>Huỷ</button>
+              <button onClick={async()=>{const b={};Object.entries(bdgDraft).forEach(([k,v])=>{if(v)b[k]=v;});await persistBudgets(b);setEditBudget(false);}}
+                style={{flex:2,padding:"13px",borderRadius:10,border:"none",background:BLU_MID,cursor:"pointer",fontSize:14,fontWeight:500,color:"#fff"}}>💾 Lưu ngân sách</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Detail Sheet ── */}
+      {detail && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"flex-end",zIndex:100}} onClick={()=>setDetail(null)}>
+          <div style={{...card,margin:0,borderRadius:"18px 18px 0 0",width:"100%",maxHeight:"82vh",overflowY:"auto",boxSizing:"border-box",padding:"20px 20px 32px"}} onClick={e=>e.stopPropagation()}>
+            <div style={{width:36,height:4,borderRadius:2,background:"var(--color-border-secondary)",margin:"0 auto 18px"}}/>
+            {detail.image_path&&<img src={detail.image_path} style={{width:"100%",maxHeight:180,objectFit:"contain",borderRadius:10,marginBottom:14,border:"0.5px solid var(--color-border-tertiary)"}}/>}
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+              <div style={{width:44,height:44,borderRadius:12,background:detail.type==="income"?GRN_BG:RED_BG,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>{ICONS[detail.category]||"📌"}</div>
+              <div>
+                <div style={{fontWeight:500,fontSize:16}}>{detail.description}</div>
+                <span style={{fontSize:12,padding:"3px 10px",borderRadius:20,background:detail.type==="income"?GRN_BG:RED_BG,color:detail.type==="income"?GRN:RED,display:"inline-block",marginTop:3}}>
+                  {detail.type==="income"?"Thu nhập":"Chi tiêu"}
+                </span>
+              </div>
+            </div>
+            {[["Số tiền",fFull(detail.amount)],["Danh mục",detail.category],["Ghi chú",detail.note_text],["Nguồn",detail.source],["Thời gian",new Date(detail.date_time).toLocaleString("vi-VN")]].map(([k,v])=>v?(
+              <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"10px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",fontSize:14}}>
+                <span style={{color:"var(--color-text-secondary)",flexShrink:0}}>{k}</span>
+                <span style={{fontWeight:500,maxWidth:"62%",textAlign:"right",wordBreak:"break-word"}}>{v}</span>
+              </div>
+            ):null)}
+            <div style={{display:"flex",gap:8,marginTop:18}}>
+              <button onClick={()=>setDetail(null)} style={{flex:1,padding:"13px",borderRadius:10,border:"0.5px solid var(--color-border-secondary)",background:"transparent",cursor:"pointer",fontSize:14,color:"var(--color-text-primary)"}}>Đóng</button>
+              <button onClick={()=>delTxn(detail.id)} style={{flex:1,padding:"13px",borderRadius:10,border:"none",background:RED_BG,cursor:"pointer",fontSize:14,fontWeight:500,color:RED}}>🗑 Xoá</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
