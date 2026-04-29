@@ -55,12 +55,15 @@ input,select,button,textarea{font-family:inherit;outline:none}
 </head>
 <body>
 
-<div style="padding:18px 16px 0;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+  <div style="padding:18px 16px 0;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
   <div style="display:flex;align-items:center;gap:8px">
     <span style="font-size:20px">💰</span>
     <span style="font-weight:500;font-size:16px">Thu Chi Cá Nhân</span>
   </div>
-  <span id="today-lbl" style="font-size:12px;color:#888"></span>
+  <div style="display:flex;align-items:center;gap:8px">
+    <span id="sync-status" style="font-size:11px"></span>
+    <span id="today-lbl" style="font-size:12px;color:#888"></span>
+  </div>
 </div>
 
 <!-- PAGES -->
@@ -242,10 +245,30 @@ const CATS=["ăn uống","cafe","di chuyển","mua sắm","tiền nhà","điện
 const ICONS={"ăn uống":"🍜","cafe":"☕","di chuyển":"🚗","mua sắm":"🛍","tiền nhà":"🏠","điện nước":"💡","giải trí":"🎮","sức khỏe":"💊","công việc":"💼","khác":"📌"};
 const PAL=["#378ADD","#639922","#E24B4A","#BA7517","#7F77DD","#1D9E75","#D85A30","#5F5E5A","#D4537E","#888780"];
 
+const GS_URL="https://script.google.com/macros/s/AKfycbzD6P01gth8qQU2EQUY1RYQWm5inLr6jODnRfluGSjfLFTooR1XH-QE8cN_r773zimlzw/exec";
 let txns=[], budgets={}, imgPrev=null, selType="expense", selCat="ăn uống";
 let curPeriod="month", rptPeriod="month", histFilter="all";
 let lineChartInst=null, pieChartInst=null, rptLineInst=null;
-let bdgDraft={};
+let bdgDraft={}, syncing=false;
+
+async function gsGet(){
+  try{
+    const r=await fetch(GS_URL);
+    const d=await r.json();
+    return d.ok?d.data:[];
+  }catch{return null;}
+}
+async function gsPost(payload){
+  try{
+    await fetch(GS_URL,{method:"POST",body:JSON.stringify(payload)});
+  }catch(e){console.warn("GS error",e);}
+}
+function showSyncStatus(msg,color){
+  let el=document.getElementById("sync-status");
+  if(!el)return;
+  el.textContent=msg;el.style.color=color;
+  setTimeout(()=>{el.textContent="";},3000);
+}
 
 // ---- Parse engine ----
 function parse(raw){
@@ -287,16 +310,34 @@ function genId(){return Date.now()+Math.random().toString(36).slice(2);}
 function toDay(){return new Date().toISOString().slice(0,10);}
 function nowM(){const n=new Date();return{m:n.getMonth(),y:n.getFullYear()};}
 
-function load(){
-  try{txns=JSON.parse(localStorage.getItem("fin_txns")||"[]");}catch{txns=[];}
+async function load(){
   try{budgets=JSON.parse(localStorage.getItem("fin_budgets")||"{}");}catch{budgets={};}
   document.getElementById("today-lbl").textContent=toDay();
-  buildCatChips();
-  renderAll();
-  updateSaveBtn();
+  // Load từ localStorage trước để hiển thị nhanh
+  try{txns=JSON.parse(localStorage.getItem("fin_txns")||"[]");}catch{txns=[];}
+  buildCatChips(); renderAll(); updateSaveBtn();
+  // Sau đó sync từ Google Sheet
+  showSyncStatus("🔄 Đang đồng bộ..","#888");
+  const remote=await gsGet();
+  if(remote&&Array.isArray(remote)){
+    txns=remote.filter(t=>t.id);
+    localStorage.setItem("fin_txns",JSON.stringify(txns));
+    renderAll(); renderFrequent(); buildCatChips();
+    showSyncStatus("✅ Đã đồng bộ","var(--grn-mid)");
+  } else {
+    showSyncStatus("⚠️ Offline — dùng dữ liệu cục bộ","var(--amb-mid)");
+  }
 }
 
-function persist(){localStorage.setItem("fin_txns",JSON.stringify(txns));}
+function persist(){
+  localStorage.setItem("fin_txns",JSON.stringify(txns));
+}
+async function persistAndSync(txn,action){
+  persist();
+  showSyncStatus("🔄 Đang lưu..","#888");
+  await gsPost({action,id:txn.id,...txn});
+  showSyncStatus("✅ Đã lưu lên Sheet","var(--grn-mid)");
+}
 function persistBudgets(){localStorage.setItem("fin_budgets",JSON.stringify(budgets));}
 
 // ---- Month spending ----
@@ -465,6 +506,7 @@ function saveTxn(){
   const amt=p?.amount||0; if(!amt)return;
   const t={id:genId(),amount:amt,type:selType,description:p.description||note,category:selCat,note_text:note,date_time:new Date().toISOString(),source:imgPrev?"screenshot":"manual",image_path:imgPrev||null,tags:[]};
   txns.unshift(t); persist();
+  persistAndSync(t,"add");
   clearNote();
   imgPrev=null;
   document.getElementById("img-preview").style.display="none";
@@ -738,7 +780,11 @@ function showDetail(id){
   document.getElementById("detail-rows").innerHTML=[["Số tiền",fFull(t.amount)],["Danh mục",t.category],["Ghi chú",t.note_text],["Nguồn",t.source],["Thời gian",new Date(t.date_time).toLocaleString("vi-VN")]].filter(([,v])=>v).map(([k,v])=>`<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:10px 0;border-bottom:1px solid #f5f5f5;font-size:14px">
     <span style="color:#888;flex-shrink:0">${k}</span><span style="font-weight:500;max-width:62%;text-align:right;word-break:break-word">${v}</span>
   </div>`).join("");
-  document.getElementById("detail-del-btn").onclick=()=>{txns=txns.filter(x=>x.id!==id);persist();closeModal("detail-modal");renderAll();};
+  document.getElementById("detail-del-btn").onclick=async()=>{
+    const del=txns.find(x=>x.id===id);
+    txns=txns.filter(x=>x.id!==id);persist();closeModal("detail-modal");renderAll();
+    if(del){showSyncStatus("🔄 Đang xoá..","#888");await gsPost({action:"delete",id:del.id});showSyncStatus("✅ Đã xoá","var(--grn-mid)");}
+  };
   openModal("detail-modal");
 }
 
