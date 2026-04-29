@@ -535,11 +535,23 @@ function getMonths(){
     return{name:["T1","T2","T3","T4","T5","T6","T7","T8","T9","T10","T11","T12"][d.getMonth()],thu:mo.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0),chi:mo.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0)};
   });
 }
-function makePills(containerId,value,onChange){
+function makePills(containerId,value,callbackName){
   const el=document.getElementById(containerId);
   el.innerHTML=[["today","Hôm nay"],["week","Tuần"],["month","Tháng"],["all","Tất cả"]].map(([k,v])=>
-    `<button class="pill ${value===k?"active-blu":"inactive"}" onclick="(${onChange.toString()})('${k}',this)">${v}</button>`
+    `<button class="pill ${value===k?"active-blu":"inactive"}" onclick="${callbackName}('${k}',this)">${v}</button>`
   ).join("");
+}
+function onDashPeriod(k,el){
+  curPeriod=k;
+  document.querySelectorAll("#dash-period-pills .pill").forEach(b=>{b.classList.remove("active-blu");b.classList.add("inactive");});
+  el.classList.remove("inactive");el.classList.add("active-blu");
+  renderDashboard();
+}
+function onRptPeriod(k,el){
+  rptPeriod=k;
+  document.querySelectorAll("#rpt-period-pills .pill").forEach(b=>{b.classList.remove("active-blu");b.classList.add("inactive");});
+  el.classList.remove("inactive");el.classList.add("active-blu");
+  renderReport();
 }
 function makeMetrics(containerId,inc,exp,net){
   document.getElementById(containerId).innerHTML=[
@@ -567,7 +579,7 @@ function makeTxnRow(t,onclick){
 function renderDashboard(){
   const arr=txns.filter(t=>inPeriod(t,curPeriod));
   const{inc,exp,net}=summary(arr);
-  makePills("dash-period-pills",curPeriod,function(k){curPeriod=k;renderDashboard();});
+  makePills("dash-period-pills",curPeriod,"onDashPeriod");
   makeMetrics("dash-metrics",inc,exp,net);
 
   // Alerts
@@ -650,7 +662,7 @@ function renderHistory(){
 function renderReport(){
   const arr=txns.filter(t=>inPeriod(t,rptPeriod));
   const{inc,exp,net}=summary(arr);
-  makePills("rpt-period-pills",rptPeriod,function(k){rptPeriod=k;renderReport();});
+  makePills("rpt-period-pills",rptPeriod,"onRptPeriod");
   makeMetrics("rpt-metrics",inc,exp,net);
 
   // Budget overview
