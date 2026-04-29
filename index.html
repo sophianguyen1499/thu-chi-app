@@ -281,29 +281,135 @@ function showSyncStatus(msg,color){
 // ---- Parse engine ----
 function parse(raw){
   if(!raw) return null;
-  const txt=raw.trim();
-  let type=/(thu|nhận|lương|hoàn|refund|khách trả)/i.test(txt)?"income":"expense";
-  const rx=/([\d]+(?:[.,]\d+)?)\s*(tr|triệu|k|nghìn|ngàn)?/gi;
-  let amount=0,amtStr="",m;
+  let txt=raw.trim();
+
+  // --- Detect type ---
+  // "+" prefix = thu, "-" prefix = chi
+  let type="expense";
+  if(/^\+/.test(txt)) { type="income"; txt=txt.replace(/^\+/,"").trim(); }
+  else if(/^-/.test(txt)) { type="expense"; txt=txt.replace(/^-/,"").trim(); }
+  else if(/(^|\s)(thu nhập|thu tiền|nhận tiền|nhận lương|lương|nhận|thưởng|bonus|hoàn tiền|hoàn|refund|bán hàng|bán|khách trả|freelance|doanh thu|hoa hồng|salary)/i.test(txt)) type="income";
+
+  // --- Extract amount ---
+  // Support: 20k, 1.5tr, 500000, 10tr, 200, 1,500,000
+  const rx=/([\d]+(?:[.,]\d{1,3})*)\s*(tr|triệu|m|k|nghìn|ngàn)?(?!\w)/gi;
+  let amount=0, amtStr="", m;
   while((m=rx.exec(txt))!==null){
-    const n=parseFloat(m[1].replace(",",".")),u=(m[2]||"").toLowerCase();
-    const v=u==="tr"||u==="triệu"?n*1e6:u==="k"||u==="nghìn"||u==="ngàn"?n*1e3:n;
+    const raw_n=m[1].replace(/,(?=\d{3})/g,"").replace(",",".");
+    const n=parseFloat(raw_n);
+    const u=(m[2]||"").toLowerCase();
+    const v=["tr","triệu","m"].includes(u)?n*1e6:["k","nghìn","ngàn"].includes(u)?n*1e3:n;
     if(v>amount){amount=v;amtStr=m[0];}
   }
   amount=Math.round(amount);
-  let desc=txt.replace(amtStr,"").replace(/\b(chi|thu|nhận|lương|hoàn|refund|khách trả|trả|mua)\b/gi,"").replace(/\s+/g," ").trim()||txt;
-  const d=desc.toLowerCase();
+
+  // --- Clean description ---
+  const stopWords=/(^|\s)(chi|thu|nhận|lương|hoàn|refund|khách trả|trả|thưởng|bonus|bán|mua|đổ|gửi|nạp|đóng|thanh toán|chuyển khoản|ck|chuyển)(\s|$)/gi;
+  let desc=txt
+    .replace(amtStr,"")
+    .replace(stopWords," ")
+    .replace(/\s+/g," ").trim();
+  if(!desc) desc=txt.trim();
+
+  // --- Category detection (mở rộng toàn diện) ---
+  const d=(desc+" "+txt).toLowerCase();
   let cat="khác";
-  if(/(cafe|cà phê|coffee|trà sữa|boba)/.test(d))cat="cafe";
-  else if(/(cơm|phở|bún|ăn|quán|nhà hàng|pizza|burger|sushi|hadilao|lẩu|bánh|food)/.test(d))cat="ăn uống";
-  else if(/(grab|xe|taxi|xăng|bus|ship|giao hàng|uber|parking)/.test(d))cat="di chuyển";
-  else if(/(shopee|lazada|mua|shop|tiki|order|amazon)/.test(d))cat="mua sắm";
-  else if(/(nhà|thuê|phòng|rent|chung cư)/.test(d))cat="tiền nhà";
-  else if(/(điện|nước|internet|wifi|điện thoại)/.test(d))cat="điện nước";
-  else if(/(phim|game|nhạc|karaoke|netflix|spotify)/.test(d))cat="giải trí";
-  else if(/(thuốc|bác sĩ|khám|gym|spa)/.test(d))cat="sức khỏe";
-  else if(/(lương|công|freelance|thưởng|salary|dự án)/.test(d))cat="công việc";
-  return{amount,type,description:desc,category:cat};
+
+  // Ăn uống
+  if(/(cafe|cf|cà phê|coffee|trà sữa|boba|trà|milk tea|matcha)/.test(d)) cat="cafe";
+  else if(/(
+    cơm|phở|bún|bún bò|bún riêu|bún mắm|bún thịt|
+    hủ tiếu|mì|miến|bánh mì|bánh cuốn|bánh xèo|bánh canh|
+    ăn sáng|ăn trưa|ăn tối|ăn vặt|ăn uống|ăn|
+    quán|nhà hàng|restaurant|food|đồ ăn|
+    pizza|burger|kfc|mcdo|lotteria|gà rán|
+    sushi|ramen|cơm tấm|cơm rang|
+    lẩu|hotpot|hadilao|haidilao|
+    nhậu|bia|rượu|nhậu nhẹt|
+    nước|nước ngọt|nước suối|sinh tố|
+    chè|kem|tráng miệng|dessert|
+    snack|bánh|kẹo|đồ ngọt|ăn vặt
+  )/.test(d.replace(/\n/g,"|"))) cat="ăn uống";
+
+  // Di chuyển
+  else if(/(
+    xăng|đổ xăng|đổ dầu|
+    grab|gojek|be|uber|taxi|xe ôm|
+    gửi xe|giữ xe|parking|đỗ xe|
+    vé xe|xe buýt|bus|metro|tàu|xe lửa|máy bay|vé bay|
+    shipper|ship|giao hàng|grab food|
+    sửa xe|bảo dưỡng xe|rửa xe|thay nhớt
+  )/.test(d.replace(/\n/g,"|"))) cat="di chuyển";
+
+  // Mua sắm
+  else if(/(
+    shopee|lazada|tiki|amazon|sendo|
+    áo|quần|giày|dép|túi|ví|belt|thắt lưng|
+    mỹ phẩm|skincare|son|kem|serum|nước hoa|
+    đồ gia dụng|nồi|chảo|bát|đĩa|
+    điện thoại|phone|laptop|máy tính|tablet|
+    sạc|tai nghe|phụ kiện|
+    sách|văn phòng phẩm|
+    shopping|mua sắm|order|đặt hàng
+  )/.test(d.replace(/\n/g,"|"))) cat="mua sắm";
+
+  // Tiền nhà
+  else if(/(
+    tiền nhà|thuê nhà|thuê phòng|phòng trọ|chung cư|
+    rent|căn hộ|ký túc xá|nhà trọ|
+    phí quản lý|phí chung cư|phí dịch vụ
+  )/.test(d.replace(/\n/g,"|"))) cat="tiền nhà";
+
+  // Điện nước
+  else if(/(
+    tiền điện|hóa đơn điện|điện tháng|
+    tiền nước|hóa đơn nước|nước tháng|
+    internet|wifi|cáp quang|
+    tiền mạng|điện thoại|phone bill|
+    gas|bình gas
+  )/.test(d.replace(/\n/g,"|"))) cat="điện nước";
+
+  // Giải trí
+  else if(/(
+    phim|cinema|rạp|xem phim|
+    game|steam|app store|google play|
+    nhạc|spotify|youtube|
+    karaoke|bida|bi a|bowling|
+    netflix|prime|disney|
+    du lịch|travel|tour|resort|khách sạn|hotel|
+    vé|concert|sự kiện|event|
+    sinh nhật|birthday party|tiệc|nhậu chơi
+  )/.test(d.replace(/\n/g,"|"))) cat="giải trí";
+
+  // Sức khỏe
+  else if(/(
+    thuốc|dược|pharmacy|nhà thuốc|
+    bác sĩ|bệnh viện|phòng khám|khám bệnh|khám|
+    xét nghiệm|siêu âm|x-quang|
+    gym|thể dục|yoga|fitness|
+    spa|massage|nail|tóc|cắt tóc|salon|
+    bảo hiểm y tế|bhyt
+  )/.test(d.replace(/\n/g,"|"))) cat="sức khỏe";
+
+  // Công việc / Thu nhập
+  else if(/(
+    lương|salary|thu nhập|income|
+    thưởng|bonus|hoa hồng|commission|
+    freelance|dự án|project|contract|
+    bán hàng|doanh thu|revenue|
+    khách trả|thanh toán từ|nhận từ
+  )/.test(d.replace(/\n/g,"|"))) cat="công việc";
+
+  // Chuyển khoản / Trả nợ — vẫn giữ khác (tuỳ context)
+  else if(/(
+    chuyển khoản|ck|chuyển tiền|
+    trả nợ|trả tiền|nợ|
+    quà|tặng quà|gift|
+    học phí|học|trường|lớp|
+    đóng tiền|nộp tiền|phí
+  )/.test(d.replace(/\n/g,"|"))) cat="khác";
+
+  return{amount,type,description:desc||txt,category:cat};
 }
 
 function fVND(n){
