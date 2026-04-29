@@ -245,7 +245,7 @@ const CATS=["ăn uống","cafe","di chuyển","mua sắm","tiền nhà","điện
 const ICONS={"ăn uống":"🍜","cafe":"☕","di chuyển":"🚗","mua sắm":"🛍","tiền nhà":"🏠","điện nước":"💡","giải trí":"🎮","sức khỏe":"💊","công việc":"💼","khác":"📌"};
 const PAL=["#378ADD","#639922","#E24B4A","#BA7517","#7F77DD","#1D9E75","#D85A30","#5F5E5A","#D4537E","#888780"];
 
-const GS_URL="https://script.google.com/macros/s/AKfycbzD6P01gth8qQU2EQUY1RYQWm5inLr6jODnRfluGSjfLFTooR1XH-QE8cN_r773zimlzw/exec";
+const GS_URL="https://script.google.com/macros/s/AKfycbyT61dkMcfclBNUCE1VEHuH1liMwNJYKc0h9pCHEvjEsKX46_hsrr5Yl9FVcjXPo3JE5A/exec";
 let txns=[], budgets={}, imgPrev=null, selType="expense", selCat="ăn uống";
 let curPeriod="month", rptPeriod="month", histFilter="all";
 let lineChartInst=null, pieChartInst=null, rptLineInst=null;
@@ -253,15 +253,23 @@ let bdgDraft={}, syncing=false;
 
 async function gsGet(){
   try{
-    const r=await fetch(GS_URL);
-    const d=await r.json();
+    const r=await fetch(GS_URL+"?t="+Date.now(),{redirect:"follow"});
+    const txt=await r.text();
+    const d=JSON.parse(txt);
     return d.ok?d.data:[];
-  }catch{return null;}
+  }catch(e){console.warn("gsGet error",e);return null;}
 }
+
 async function gsPost(payload){
   try{
-    await fetch(GS_URL,{method:"POST",body:JSON.stringify(payload)});
-  }catch(e){console.warn("GS error",e);}
+    // Dùng no-cors vì Apps Script redirect — ghi vẫn thành công dù không đọc được response
+    await fetch(GS_URL,{
+      method:"POST",
+      mode:"no-cors",
+      headers:{"Content-Type":"text/plain"},
+      body:JSON.stringify(payload)
+    });
+  }catch(e){console.warn("gsPost error",e);}
 }
 function showSyncStatus(msg,color){
   let el=document.getElementById("sync-status");
@@ -335,8 +343,15 @@ function persist(){
 async function persistAndSync(txn,action){
   persist();
   showSyncStatus("🔄 Đang lưu..","#888");
-  await gsPost({action,id:txn.id,...txn});
-  showSyncStatus("✅ Đã lưu lên Sheet","var(--grn-mid)");
+  await gsPost({action,...txn});
+  // Chờ 1.5s rồi verify bằng cách pull lại
+  setTimeout(async()=>{
+    const remote=await gsGet();
+    if(remote&&Array.isArray(remote)){
+      const found=remote.find(r=>r.id===txn.id);
+      showSyncStatus(found?"✅ Đã lưu lên Sheet":"⚠️ Chưa sync, thử lại","var(--grn-mid)");
+    }
+  },1500);
 }
 function persistBudgets(){localStorage.setItem("fin_budgets",JSON.stringify(budgets));}
 
