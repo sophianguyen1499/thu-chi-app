@@ -55,7 +55,24 @@ input,select,button,textarea{font-family:inherit;outline:none}
 </head>
 <body>
 
-  <div style="padding:18px 16px 0;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+  <!-- User select screen -->
+<div id="user-screen" style="display:none;padding:40px 24px;max-width:480px;margin:0 auto">
+  <div style="text-align:center;margin-bottom:32px">
+    <div style="font-size:44px;margin-bottom:10px">💰</div>
+    <div style="font-size:22px;font-weight:600;margin-bottom:6px">Thu Chi Cá Nhân</div>
+    <div style="font-size:14px;color:#888">Chọn người dùng để tiếp tục</div>
+  </div>
+  <div id="user-list" style="margin-bottom:20px"></div>
+  <!-- Add new user -->
+  <div id="add-user-form" style="background:var(--bg2);border-radius:14px;padding:16px;border:1px solid var(--border)">
+    <div style="font-size:13px;font-weight:500;margin-bottom:10px;color:#555">+ Thêm người dùng mới</div>
+    <input class="inp" id="new-user-name" placeholder="Nhập tên (vd: Sophia, Mẹ, Bố...)" style="margin-bottom:10px"/>
+    <button onclick="addUser()" style="width:100%;padding:12px;border-radius:10px;border:none;background:var(--blu-mid);color:#fff;font-size:14px;font-weight:500;cursor:pointer">Tạo người dùng</button>
+  </div>
+</div>
+
+<!-- Main app -->
+<div id="main-app" style="display:none">
   <div style="display:flex;align-items:center;gap:8px">
     <span style="font-size:20px">💰</span>
     <span style="font-weight:500;font-size:16px">Thu Chi Cá Nhân</span>
@@ -239,17 +256,30 @@ input,select,button,textarea{font-family:inherit;outline:none}
   </div>
 </div>
 
+</div><!-- end main-app -->
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 const CATS=["ăn uống","cafe","di chuyển","mua sắm","tiền nhà","điện nước","giải trí","sức khỏe","công việc","khác"];
 const ICONS={"ăn uống":"🍜","cafe":"☕","di chuyển":"🚗","mua sắm":"🛍","tiền nhà":"🏠","điện nước":"💡","giải trí":"🎮","sức khỏe":"💊","công việc":"💼","khác":"📌"};
 const PAL=["#378ADD","#639922","#E24B4A","#BA7517","#7F77DD","#1D9E75","#D85A30","#5F5E5A","#D4537E","#888780"];
 
-const GS_URL="https://script.google.com/macros/s/AKfycbyT61dkMcfclBNUCE1VEHuH1liMwNJYKc0h9pCHEvjEsKX46_hsrr5Yl9FVcjXPo3JE5A/exec";
+const GS_URL="https://script.google.com/macros/s/AKfycbxEptCUNBGvQMPLICqyGGg5le7V-9wp6zrASu-SFz1qJ_NKKaSs9idRfCHz23GGeUwM/exec";
 let txns=[], budgets={}, imgPrev=null, selType="expense", selCat="ăn uống";
 let curPeriod="month", rptPeriod="month", histFilter="all";
 let lineChartInst=null, pieChartInst=null, rptLineInst=null;
-let bdgDraft={}, syncing=false;
+let bdgDraft={}, currentUser=null;
+
+// ---- User management ----
+function getUsers(){
+  try{return JSON.parse(localStorage.getItem("fin_users")||"[]");}catch{return[];}
+}
+function saveUsers(u){localStorage.setItem("fin_users",JSON.stringify(u));}
+function getCurrentUser(){return JSON.parse(localStorage.getItem("fin_current_user")||"null");}
+function setCurrentUser(u){localStorage.setItem("fin_current_user",JSON.stringify(u));}
+function genUserId(){return "u_"+Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
+function getUserColor(idx){const c=["#378ADD","#639922","#E24B4A","#BA7517","#7F77DD","#1D9E75"];return c[idx%c.length];}
+function getUserInitial(name){return name.trim().charAt(0).toUpperCase();}
 
 async function gsGet(){
   try{
@@ -372,14 +402,13 @@ function persist(){
 async function persistAndSync(txn,action){
   persist();
   showSyncStatus("🔄 Đang lưu..","#888");
-  await gsPost({action,...txn});
-  // Verify sau 2s
+  await gsPost({action,...txn,user_id:currentUser.id});
   setTimeout(async()=>{
     const remote=await gsGet();
     if(remote&&Array.isArray(remote)){
       if(action==="add"){
         const found=remote.find(r=>String(r.id)===String(txn.id));
-        showSyncStatus(found?"✅ Đã lưu lên Sheet":"⚠️ Chưa sync được Sheet","var(--grn-mid)");
+        showSyncStatus(found?"✅ Đã lưu lên Sheet":"⚠️ Chưa sync được","var(--grn-mid)");
       } else {
         showSyncStatus("✅ Sheet đã cập nhật","var(--grn-mid)");
       }
