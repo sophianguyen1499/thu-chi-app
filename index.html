@@ -338,6 +338,11 @@ async function initApp(){
   try{txns=JSON.parse(localStorage.getItem("fin_txns_"+currentUser.id)||"[]");}catch{txns=[];}
   setTab("quick");
   buildCatChips(); renderAll(); updateSaveBtn(); renderFrequent();
+  // Retry sync queue từ lần trước nếu có
+  if(syncQueue.length){
+    showSyncStatus("🔄 Đang retry "+syncQueue.length+" giao dịch..","#888");
+    flushSyncQueue();
+  }
   showSyncStatus("🔄 Đang đồng bộ..","#888");
   const remote=await gsGet();
   if(remote&&Array.isArray(remote)){
@@ -352,20 +357,40 @@ async function initApp(){
   }
 }
 
-function persist(){localStorage.setItem("fin_txns_"+currentUser.id,JSON.stringify(txns));}
-function persistBudgets(){localStorage.setItem("fin_budgets_"+currentUser.id,JSON.stringify(budgets));}
+// Queue các giao dịch chưa sync
+let syncQueue=JSON.parse(localStorage.getItem("fin_sync_queue")||"[]");
+function saveSyncQueue(){localStorage.setItem("fin_sync_queue",JSON.stringify(syncQueue));}
+
+async function syncToSheet(txn,action){
+  // Thêm vào queue trước
+  syncQueue.push({txn,action,retries:0});
+  saveSyncQueue();
+  showSyncStatus("☁️ Đang sync..","#aaa");
+  await flushSyncQueue();
+}
+
+async function flushSyncQueue(){
+  if(!syncQueue.length){showSyncStatus("","#aaa");return;}
+  const failed=[];
+  for(const item of syncQueue){
+    try{
+      await gsPost({action:item.action,...item.txn});
+    }catch{
+      item.retries=(item.retries||0)+1;
+      if(item.retries<5) failed.push(item); // retry tối đa 5 lần
+    }
+  }
+  syncQueue=failed;
+  saveSyncQueue();
+  if(!failed.length){
+    showSyncStatus("✅ Đã sync","var(--grn-mid)");
+  }else{
+    showSyncStatus("⚠️ "+failed.length+" chờ sync","var(--amb-mid)");
+  }
+}
 
 async function persistAndSync(txn,action){
-  persist();
-  showSyncStatus("🔄 Đang lưu..","#888");
-  await gsPost({action,...txn});
-  setTimeout(async()=>{
-    const remote=await gsGet();
-    if(remote&&Array.isArray(remote)){
-      const found=remote.find(r=>String(r.id)===String(txn.id));
-      showSyncStatus(action==="add"?(found?"✅ Đã lưu lên Sheet":"⚠️ Chưa sync"):"✅ Đã cập nhật","var(--grn-mid)");
-    }
-  },2000);
+  await syncToSheet(txn,action);
 }
 
 // ===== PARSE ENGINE =====
@@ -530,13 +555,15 @@ function updateSaveBtn(){
 }
 
 // ===== SAVE TXN =====
-async function saveTxn(){
+function saveTxn(){
   const note=document.getElementById("note-inp").value.trim();
   const p=note?parse(note):null;
   const amt=p?.amount||0;if(!amt)return;
   const t={id:genId(),amount:amt,type:selType,description:p.description||note,category:selCat,note_text:note,date_time:new Date().toISOString(),source:imgPrev?"screenshot":"manual",image_path:imgPrev||null,tags:[]};
+
+  // 1. Lưu local + cập nhật UI ngay lập tức (không await)
   txns.unshift(t);
-  await persistAndSync(t,"add");
+  persist();
   clearNote();
   imgPrev=null;
   document.getElementById("img-preview").style.display="none";
@@ -544,7 +571,10 @@ async function saveTxn(){
   document.getElementById("img-remove").style.display="none";
   renderFrequent();buildCatChips();renderAll();
   const f=document.getElementById("flash-msg");
-  f.classList.add("show");setTimeout(()=>f.classList.remove("show"),1500);
+  f.classList.add("show");setTimeout(()=>f.classList.remove("show"),1200);
+
+  // 2. Sync lên Google Sheet ngầm, không block UI
+  syncToSheet(t,"add");
 }
 
 function handleImg(el){const f=el.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{imgPrev=ev.target.result;document.getElementById("img-preview").src=imgPrev;document.getElementById("img-preview").style.display="block";document.getElementById("img-btn-lbl").textContent="Ảnh đính kèm ✅";document.getElementById("img-remove").style.display="inline";};r.readAsDataURL(f);}
@@ -618,10 +648,12 @@ function showDetail(id){
   document.getElementById("detail-title").textContent=t.description;
   document.getElementById("detail-badge").innerHTML=`<span class="badge" style="background:${isInc?"var(--grn-bg)":"var(--red-bg)"};color:${isInc?"var(--grn)":"var(--red)"};margin-top:4px;display:inline-block">${isInc?"Thu nhập":"Chi tiêu"}</span>`;
   document.getElementById("detail-rows").innerHTML=[["Số tiền",fFull(t.amount)],["Danh mục",t.category],["Ghi chú",t.note_text],["Nguồn",t.source],["Thời gian",new Date(t.date_time).toLocaleString("vi-VN")]].filter(([,v])=>v).map(([k,v])=>`<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:10px 0;border-bottom:1px solid #f5f5f5;font-size:14px"><span style="color:#888;flex-shrink:0">${k}</span><span style="font-weight:500;max-width:62%;text-align:right;word-break:break-word">${v}</span></div>`).join("");
-  document.getElementById("detail-del-btn").onclick=async()=>{
+  document.getElementById("detail-del-btn").onclick=()=>{
     const del=txns.find(x=>x.id===id);
-    txns=txns.filter(x=>x.id!==id);persist();closeModal("detail-modal");renderAll();
-    if(del){showSyncStatus("🔄 Đang xoá..","#888");await gsPost({action:"delete",id:del.id});showSyncStatus("✅ Đã xoá","var(--grn-mid)");}
+    txns=txns.filter(x=>x.id!==id);
+    persist();closeModal("detail-modal");renderAll();
+    // Sync xoá ngầm
+    if(del) syncToSheet(del,"delete");
   };
   openModal("detail-modal");
 }
